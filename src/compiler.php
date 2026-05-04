@@ -2265,6 +2265,7 @@ class Compiler extends GolampiBaseVisitor {
                     
                     // Emitir argumentos en los registros correctos
                     // Estrategia: Evaluar de derecha a izquierda para evitar sobrescribir x0
+                    // Audit note: garantizar evaluación derecha->izquierda (especificación)
                     $argCount = count($argExprs);
                     for ($argIdx = $argCount - 1; $argIdx >= 0; $argIdx--) {
                         $argExpr = $argExprs[$argIdx];

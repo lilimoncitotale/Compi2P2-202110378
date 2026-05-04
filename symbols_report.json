@@ -1,0 +1,16 @@
+[
+    {
+        "identifier": "matrizNoInit",
+        "type": "array",
+        "scope": "_start",
+        "value": "[2,2]",
+        "line": 14
+    },
+    {
+        "identifier": "matrizInit",
+        "type": "array",
+        "scope": "_start",
+        "value": "[2,2]",
+        "line": 15
+    }
+]
