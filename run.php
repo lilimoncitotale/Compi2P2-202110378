@@ -14,8 +14,8 @@ require_once __DIR__ . '/generated/GolampiVisitor.php';
 require_once __DIR__ . '/generated/GolampiBaseVisitor.php';
 
 require_once __DIR__ . '/src/Enviroment.php';
-require_once __DIR__ . '/src/Interpreter.php';
 require_once __DIR__ . '/src/SyntaxErrorListener.php';
+require_once __DIR__ . '/src/compiler.php';  // NUEVO: compilador ARM64
 
 // Verificar si se proporcionó un archivo
 if ($argc < 2) {
@@ -29,47 +29,43 @@ if (!file_exists($file)) {
     exit(1);
 }
 
-echo "=== DIAGNÓSTICO ===\n";
+echo "=== COMPILADOR GOLAMPI -> ARM64 ===\n";
 echo "Archivo: $file\n";
 echo "Tamaño: " . filesize($file) . " bytes\n";
-echo "Iniciando proceso...\n";
+echo "Iniciando proceso de compilación...\n";
 
 // Leer el archivo
 $input = file_get_contents($file);
 echo "Archivo leído: " . strlen($input) . " caracteres\n";
 
-// Preprocesar: mover asignaciones/decl. cortas top-level dentro de main() para permitir parseo
+// Preprocesar (mismo código que tenías - mantenerlo)
 $input = (function($input){
     $lines = preg_split('/\r?\n/', $input);
     $inMultilineComment = false;
     $topLines = [];
     $otherLines = [];
 
-    // Encontrar índice de la línea donde comienza la primera función (ej. "func ")
     $firstFuncIdx = null;
     foreach ($lines as $i => $ln) {
         if (preg_match('/\/\*/', $ln)) $inMultilineComment = true;
         if ($inMultilineComment && preg_match('/\*\//', $ln)) { $inMultilineComment = false; }
-        // Buscar la función main específicamente
         if (!$inMultilineComment && preg_match('/^\s*func\s+main\b/', $ln)) { $firstFuncIdx = $i; break; }
     }
 
-    if ($firstFuncIdx === null) return $input; // nada que hacer
+    if ($firstFuncIdx === null) return $input;
 
-    // Separar top-level (antes de the primera func) y resto
     $top = array_slice($lines, 0, $firstFuncIdx);
     $rest = array_slice($lines, $firstFuncIdx);
 
     $move = [];
     $keepTop = [];
     $inMulti = false;
-    $braceLevel = 0; // track nesting to avoid touching lines inside function bodies
+    $braceLevel = 0;
     foreach ($top as $ln) {
         $trim = ltrim($ln);
         if ($inMulti) {
             $keepTop[] = $ln;
             if (strpos($ln, '*/') !== false) $inMulti = false;
-            // update brace level in case comment contains braces
             if (strpos($ln, '{') !== false) $braceLevel += substr_count($ln, '{');
             if (strpos($ln, '}') !== false) $braceLevel -= substr_count($ln, '}');
             continue;
@@ -77,7 +73,6 @@ $input = (function($input){
         if (strpos($trim, '/*') === 0) { $inMulti = true; $keepTop[] = $ln; continue; }
         if ($trim === '' || strpos($trim, '//') === 0) { $keepTop[] = $ln; continue; }
 
-        // If we're inside a function or any brace scope, keep lines intact
         if ($braceLevel > 0) {
             $keepTop[] = $ln;
             if (strpos($ln, '{') !== false) $braceLevel += substr_count($ln, '{');
@@ -85,7 +80,6 @@ $input = (function($input){
             continue;
         }
 
-        // Mantener/normalizar declaraciones: var, const (solo a nivel top)
         if (preg_match('/^\s*(var|const)\b/', $ln)) {
             if (preg_match('/^\s*var\s+([^\s].*?)\s+(\[.*\]|[A-Za-z_][A-Za-z0-9_]*(?:[0-9]*)?)\s*(?:=\s*(.*))?$/', $ln, $m)) {
                 $idList = $m[1];
@@ -101,7 +95,6 @@ $input = (function($input){
                         $keepTop[] = "var $id $typePart";
                     }
                 }
-                // update brace level in case this line opens a block
                 if (strpos($ln, '{') !== false) $braceLevel += substr_count($ln, '{');
                 if (strpos($ln, '}') !== false) $braceLevel -= substr_count($ln, '}');
                 continue;
@@ -109,43 +102,32 @@ $input = (function($input){
             $keepTop[] = $ln; continue;
         }
 
-        // Si línea parece una asignación o declaración corta (incluye listas de ids), moverla (solo top-level)
         if (preg_match('/^\s*[A-Za-z_][A-Za-z0-9_]*(\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*(:=|=)/', $ln)) { $move[] = $ln; continue; }
-        // Si parece una llamada a función top-level, moverla (solo top-level)
         if (preg_match('/^\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\)\s*;?\s*$/', $ln)) { $move[] = $ln; continue; }
-        // Por defecto mantener
         $keepTop[] = $ln;
 
-        // actualizar nivel de llaves si la línea abre/cierra un bloque (p.ej. inicio de función)
         if (strpos($ln, '{') !== false) $braceLevel += substr_count($ln, '{');
         if (strpos($ln, '}') !== false) $braceLevel -= substr_count($ln, '}');
     }
 
-    if (empty($move)) return $input; // nada que mover
+    if (empty($move)) return $input;
 
-    // No neutralizamos bloques 'switch' aquí: la gramática los soporta.
-    // Mantener $keepTop tal cual.
-
-    // Encontrar la apertura de main y la posición de la llave {
     $mainOpenIdx = null;
     $braceIdx = null;
     for ($i = 0; $i < count($rest); $i++) {
         if (preg_match('/^\s*func\s+main\s*\(/', $rest[$i])) {
             $mainOpenIdx = $i;
-            // buscar la primera línea con "{" a partir de aquí
             for ($j = $i; $j < count($rest); $j++) {
                 if (strpos($rest[$j], '{') !== false) { $braceIdx = $j; break; }
             }
             break;
         }
     }
-    if ($mainOpenIdx === null || $braceIdx === null) return $input; // no hay main bien formado
+    if ($mainOpenIdx === null || $braceIdx === null) return $input;
 
-    // Insertar las líneas movidas justo después de la línea con la llave de apertura
     $newRest = [];
     for ($i = 0; $i < count($rest); $i++) {
         $line = $rest[$i];
-        // Mantener bloques 'switch' tal cual: la gramática ya los parsea.
         $newRest[] = $line;
         if ($i === $braceIdx) {
             foreach ($move as $m) $newRest[] = $m;
@@ -154,35 +136,27 @@ $input = (function($input){
 
     $outLines = array_merge($keepTop, $newRest);
 
-    // Envolver cuerpos de 'case' sin llaves en bloques '{ ... }' para que el parser los acepte.
     $wrapped = [];
     $n = count($outLines);
     for ($i = 0; $i < $n; $i++) {
         $line = $outLines[$i];
         if (preg_match('/^(\s*)case\b.*:\s*$/', $line, $m)) {
             $indent = $m[1];
-            // Abrir bloque en la misma línea
             $wrapped[] = rtrim($line) . ' {';
-
-            // Copiar líneas hasta el próximo 'case', 'default' o '}' (cierre del switch)
             $j = $i + 1;
             while ($j < $n) {
                 $next = $outLines[$j];
                 if (preg_match('/^\s*(case\b|default\b|})/', $next)) {
-                    // Cerrar bloque antes de la siguiente etiqueta
                     $wrapped[] = $indent . '}';
                     break;
                 }
                 $wrapped[] = $next;
                 $j++;
             }
-
             if ($j >= $n) {
-                // reached EOF without finding end - close anyway
                 $wrapped[] = $indent . '}';
-                $i = $n; // finish
+                $i = $n;
             } else {
-                // continue from the line before $j (for loop will increment)
                 $i = $j - 1;
             }
             continue;
@@ -192,7 +166,6 @@ $input = (function($input){
 
     $text = implode("\n", $wrapped);
 
-    // Asegurar que los cuerpos de 'case' que no usan llaves queden envueltos en '{...}'
     $text = preg_replace_callback('/(^\\s*case[^:]*:)([\\s\\S]*?)(?=^\\s*(?:case\\b|default\\b|\\}))/m', function($m){
         $header = rtrim($m[1]);
         preg_match('/^(\\s*)/', $m[1], $im);
@@ -201,8 +174,6 @@ $input = (function($input){
         return $header . ' {' . $body . $indent . '}';
     }, $text);
 
-    // Corregir literales de arrays multidimensionales que usan llaves anidadas sin tipos
-    // Ej: [2][2]int32{{1,2},{3,4}} -> [2][2]int32{[2]int32{1,2},[2]int32{3,4}}
     $text = preg_replace_callback('/(=\s*)(\[[0-9]+\](?:\[[0-9]+\])*[A-Za-z_][A-Za-z0-9_]*)\s*(\{\{+)/', function($m){
         $eq = $m[1];
         $type = $m[2];
@@ -212,29 +183,34 @@ $input = (function($input){
         if ($numBraces <= 1 || $dims <= 1) {
             return $m[0];
         }
-        // Build inner type sequence by removing leftmost dimension each time
         $prefix = '';
         $current = $type;
         for ($i = 1; $i < $numBraces; $i++) {
-            // remove first "[n]" from $current
             $current = preg_replace('/^\[[^\]]+\]/', '', $current, 1);
             if ($current === $type) break;
             $prefix .= $current . '{';
         }
-        // produce: = type{ prefix  (and leave one '{' to open outer)
         return $eq . $type . '{' . $prefix;
     }, $text);
+
+    // Permitir short declaration con literal de arreglo tipado:
+    // nombre := [N]tipo{...}  =>  var nombre [N]tipo = [N]tipo{...}
+    $text = preg_replace_callback(
+        '/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(\[[0-9]+\](?:\[[0-9]+\])*[A-Za-z_][A-Za-z0-9_]*)\s*(\{.*\})\s*$/m',
+        function($m) {
+            $name = $m[1];
+            $arrayType = $m[2];
+            $arrayLiteral = $m[3];
+            return "var {$name} {$arrayType} = {$arrayType}{$arrayLiteral}";
+        },
+        $text
+    );
 
     return $text;
 })($input);
 
-// Mostrar versión preprocesada (diagnóstico breve)
-echo "--- PREPROCESSED INPUT (primeras 1200 chars) ---\n";
-echo substr($input, 0, 1200) . "\n";
-echo "--- FIN PREPROCESSED ---\n";
-
-// Guardar preprocesado en /tmp para inspección
-file_put_contents('/tmp/preprocessed_input.go', $input);
+// Guardar preprocesado para depuración
+file_put_contents('/tmp/preprocessed_input.golampi', $input);
 
 // Crear el stream de entrada
 echo "Creando InputStream...\n";
@@ -248,14 +224,6 @@ $lexer = new GolampiLexer($stream);
 echo "Creando TokenStream...\n";
 $tokenStream = new CommonTokenStream($lexer);
 
-$tokenStream->fill();
-$tokens = $tokenStream->getAllTokens();
-$out = [];
-foreach ($tokens as $t) {
-    $out[] = sprintf("%04d | %-20s | type=%d | line=%d | pos=%d", $t->getTokenIndex(), $t->getText(), $t->getType(), $t->getLine(), $t->getCharPositionInLine());
-}
-file_put_contents('/tmp/tokens_dump.txt', implode("\n", $out));
-
 // Crear el parser
 echo "Creando Parser...\n";
 $parser = new GolampiParser($tokenStream);
@@ -268,37 +236,172 @@ $syntaxListener = new SyntaxErrorListener();
 $parser->removeErrorListeners();
 $parser->addErrorListener($syntaxListener);
 
-// Intentar parsear (continuará intentando recuperar errores)
+// Intentar parsear
 echo "Intentando parsear programa...\n";
 $tree = null;
 try {
     $tree = $parser->program();
-    echo "Parseo (con recuperación) completado\n";
+    echo "Parseo completado\n";
 } catch (Exception $e) {
-    // Aunque la estrategia por defecto intenta recuperar, el parser puede lanzar
     echo "Excepción durante parseo: " . $e->getMessage() . "\n";
 }
 
-// Si hubo errores sintácticos, reportarlos y NO ejecutar la interpretación
+// Si hubo errores sintácticos, reportarlos
 if ($syntaxListener->hasErrors()) {
-    echo " Errores sintácticos detectados:\n";
+    echo "\n❌ ERRORES SINTÁCTICOS detectados:\n";
     foreach ($syntaxListener->getErrors() as $err) {
-        echo sprintf("Línea: %d, Col: %d, Msg: %s, Offending: %s\n", $err['line'], $err['column'], $err['message'], $err['offending'] ?? '');
+        echo sprintf("  Línea: %d, Col: %d, Msg: %s\n", $err['line'], $err['column'], $err['message']);
     }
+    exit(1);
+}
+
+if ($tree === null) {
+    echo "Error: No se pudo generar el árbol sintáctico\n";
+    exit(1);
+}
+
+// ============================================
+// NUEVO: COMPILAR A ARM64 (en lugar de interpretar)
+// ============================================
+echo "\n=== COMPILANDO A ARM64 ===\n";
+
+// Crear el compilador
+$compiler = new Compiler();
+
+// Configurar debug opcional
+// $compiler->setDebug(true);
+
+// Generar código ensamblador
+echo "Generando código ARM64...\n";
+$assembly = $compiler->visit($tree);
+
+// Mostrar resumen de la compilación
+echo "\n--- Resumen de compilación ---\n";
+$errors = $compiler->getErrors();
+$symbols = $compiler->getSymbolTable();
+
+if (!empty($errors)) {
+    echo "❌ Errores semánticos:\n";
+    foreach ($errors as $err) {
+        echo "  [{$err['type']}] Línea {$err['line']}: {$err['msg']}\n";
+    }
+    exit(1);
+}
+
+echo "✅ Compilación exitosa\n";
+echo "📊 Símbolos encontrados: " . count($symbols) . "\n";
+
+// Guardar el código ensamblador
+$outputFile = 'output.s';
+file_put_contents($outputFile, $assembly);
+echo "💾 Código ensamblador guardado en: $outputFile\n";
+
+// Mostrar primeras líneas del ensamblador
+echo "\n--- Primeras líneas del código ARM64 generado ---\n";
+$assemblyLines = explode("\n", $assembly);
+for ($i = 0; $i < min(20, count($assemblyLines)); $i++) {
+    echo $assemblyLines[$i] . "\n";
+}
+if (count($assemblyLines) > 20) {
+    echo "... (" . (count($assemblyLines) - 20) . " líneas más)\n";
+}
+
+// ============================================
+// COMPILAR CON GCC ARM64 Y EJECUTAR CON QEMU
+// ============================================
+echo "\n=== COMPILANDO CON GCC ARM64 ===\n";
+
+// Verificar que las herramientas existen
+$gccPath = trim(shell_exec("which aarch64-linux-gnu-gcc 2>/dev/null"));
+$qemuPath = trim(shell_exec("which qemu-aarch64 2>/dev/null"));
+
+if (empty($gccPath)) {
+    echo "⚠️  ADVERTENCIA: aarch64-linux-gnu-gcc no encontrado\n";
+    echo "   Instalar con: sudo apt install gcc-aarch64-linux-gnu\n";
+    echo "   Mostrando solo el código ensamblador generado\n";
+    
+    // Mostrar tabla de símbolos si hay
+    if (!empty($symbols)) {
+        echo "\n--- TABLA DE SÍMBOLOS ---\n";
+        echo str_pad("Identificador", 20) . str_pad("Tipo", 12) . str_pad("Ámbito", 12) . str_pad("Valor", 15) . "Línea\n";
+        echo str_repeat("-", 65) . "\n";
+        foreach ($symbols as $sym) {
+            echo str_pad($sym['identifier'] ?? '', 20) 
+               . str_pad($sym['type'] ?? '', 12) 
+               . str_pad($sym['scope'] ?? '', 12) 
+               . str_pad(substr($sym['value'] ?? '', 0, 12), 15) 
+               . ($sym['line'] ?? '') . "\n";
+        }
+    }
+    exit(0);
+}
+
+if (empty($qemuPath)) {
+    echo "⚠️  ADVERTENCIA: qemu-aarch64 no encontrado\n";
+    echo "   Instalar con: sudo apt install qemu-user\n";
+}
+
+// Compilar el ensamblador
+echo "Ensamblando con aarch64-linux-gnu-gcc...\n";
+$compileCmd = "aarch64-linux-gnu-gcc -static -nostdlib $outputFile -o output 2>&1";
+exec($compileCmd, $gccOutput, $gccReturnCode);
+
+if ($gccReturnCode !== 0) {
+    echo "❌ Error en la compilación con GCC:\n";
+    echo implode("\n", $gccOutput) . "\n";
+    exit(1);
+}
+
+echo "✅ Compilación exitosa. Ejecutable generado: output\n";
+
+// Ejecutar con QEMU
+echo "\n=== EJECUTANDO CON QEMU ===\n";
+echo "--- Salida del programa ---\n";
+exec("qemu-aarch64 ./output 2>&1", $programOutput, $qemuReturnCode);
+
+if ($qemuReturnCode !== 0) {
+    echo "❌ Error en la ejecución:\n";
+    echo implode("\n", $programOutput) . "\n";
 } else {
-    if ($tree !== null) {
-        // Crear intérprete
-        echo "Creando intérprete...\n";
-        $interpreter = new interpreter();
+    echo implode("\n", $programOutput) . "\n";
+}
+echo "--- Fin de la salida ---\n";
 
-        // Desactivar debug para velocidad
-        $interpreter->setDebug(false);
+// ============================================
+// GENERAR REPORTES
+// ============================================
+echo "\n=== REPORTES ===\n";
 
-        // Ejecutar
-        echo "Ejecutando programa...\n";
-        $interpreter->visit($tree);
-        echo "Ejecución completada\n";
+// Guardar tabla de símbolos
+if (!empty($symbols)) {
+    $symbolsJson = json_encode($symbols, JSON_PRETTY_PRINT);
+    file_put_contents('symbols_report.json', $symbolsJson);
+    echo "📋 Tabla de símbolos guardada en: symbols_report.json\n";
+    
+    // Mostrar en consola
+    echo "\n--- TABLA DE SÍMBOLOS ---\n";
+    echo str_pad("Identificador", 20) . str_pad("Tipo", 12) . str_pad("Ámbito", 12) . str_pad("Valor", 15) . "Línea\n";
+    echo str_repeat("-", 65) . "\n";
+    foreach ($symbols as $sym) {
+        echo str_pad($sym['identifier'] ?? '', 20) 
+           . str_pad($sym['type'] ?? '', 12) 
+           . str_pad($sym['scope'] ?? '', 12) 
+           . str_pad(substr($sym['value'] ?? '', 0, 12), 15) 
+           . ($sym['line'] ?? '') . "\n";
     }
 }
 
-echo "=== FIN DIAGNÓSTICO ===\n";
+// Guardar errores
+if (!empty($errors)) {
+    $errorsJson = json_encode($errors, JSON_PRETTY_PRINT);
+    file_put_contents('errors_report.json', $errorsJson);
+    echo "⚠️  Reporte de errores guardado en: errors_report.json\n";
+}
+
+echo "\n=== FIN DEL PROCESO ===\n";
+echo "Archivos generados:\n";
+echo "  - output.s (código ensamblador ARM64)\n";
+echo "  - output (ejecutable ARM64)\n";
+if (!empty($symbols)) echo "  - symbols_report.json\n";
+if (!empty($errors)) echo "  - errors_report.json\n";
+?>

@@ -408,21 +408,30 @@ class interpreter extends GolampiBaseVisitor
             return $this->errorSentinel;
         }
         
-        // Obtener el nombre de la variable de manera segura
-        $idNode = $ctx->IDENTIFIER();
-        if (!$idNode) {
+        // Obtener TODOS los identificadores (puede haber múltiples: var m1, m2 int32 = 10, 20)
+        $idNodes = $ctx->IDENTIFIER();
+        if (!$idNodes) {
             $this->reportError("Declaración de variable sin identificador", $ctx);
             return $this->errorSentinel;
         }
-        if (is_array($idNode)) {
-            $idNode = $idNode[0];
+        
+        // Convertir a array si es necesario
+        if (!is_array($idNodes)) {
+            $idNodes = [$idNodes];
         }
-        if (is_object($idNode) && method_exists($idNode, 'getText')) {
-            $name = $idNode->getText();
-        } else if (is_string($idNode)) {
-            $name = $idNode;
-        } else {
-            $this->reportError("Identificador inválido en declaración de variable", $ctx);
+        
+        // Extraer nombres de variables
+        $names = [];
+        foreach ($idNodes as $idNode) {
+            if (is_object($idNode) && method_exists($idNode, 'getText')) {
+                $names[] = $idNode->getText();
+            } else if (is_string($idNode)) {
+                $names[] = $idNode;
+            }
+        }
+        
+        if (empty($names)) {
+            $this->reportError("No se pudieron obtener nombres de variables", $ctx);
             return $this->errorSentinel;
         }
         
@@ -434,6 +443,13 @@ class interpreter extends GolampiBaseVisitor
         $isArray = $arrayTypeCtx !== null;
         
         if ($isArray) {
+            // Declaración de arreglo: solo puede ser UNA variable
+            if (count($names) > 1) {
+                $this->reportError("No se pueden declarar múltiples arreglos en una sola sentencia", $ctx);
+                return $this->errorSentinel;
+            }
+            
+            $name = $names[0];
             $this->dbg("=== visitVarDecl: Array ===");
             $this->dbg("Nombre: $name");
             
@@ -524,60 +540,100 @@ class interpreter extends GolampiBaseVisitor
             $this->current->define($name, $array, self::TYPE_ARRAY, false, ['line' => $line, 'column' => $column]);
             
         } else {
-            // Es una variable normal
-            $value = null;
-            $exprNode = $ctx->expression();
-            if ($exprNode) {
-                // Visitar la expresión
-                $value = $this->visit($exprNode);
-                
-                $this->dbg("VALOR EN VARDECL DESPUÉS DE VISIT: " . json_encode($value));
-                $this->dbg("Valor recibido en varDecl: " . json_encode($value));
-                $this->dbg("Tipo de valor: " . gettype($value));
-                
-                if ($value === $this->errorSentinel) return $this->errorSentinel;
-            }
-
+            // Declaración de variables normales (pueden ser múltiples)
+            // Obtener el tipo
             $declType = null;
             $typeNode = $ctx->type();
             if ($typeNode) {
-                $declType = $this->visit($typeNode);
-            }
-
-            // Manejar declaración de punteros
-            if ($declType !== null && strpos($declType, '*') === 0) {
-                $this->dbg("Tipo de puntero detectado: $declType");
-                $this->dbg("Valor recibido: " . json_encode($value));
-                
-                // Verificar que el valor sea una referencia
-                if (!is_array($value) || !isset($value['isReference']) || !$value['isReference']) {
-                    $this->reportError("Se esperaba una referencia (usar &) para inicializar puntero $name. Valor recibido: " . gettype($value), $ctx);
-                    return $this->errorSentinel;
-                }
-                
-                $this->dbg("Inicializando puntero $name con referencia a: " . $value['name']);
-                // Guardar la referencia directamente
-            }
-            // Validación normal para no-punteros
-            else if ($declType !== null && $value !== null) {
-                $vtype = $this->typeOfValue($value);
-                
-                if ($declType === self::TYPE_FLOAT && $vtype === self::TYPE_INT) {
-                    $value = (float)$value;
-                } else if ($declType === self::TYPE_INT && $vtype === self::TYPE_RUNE) {
-                    $value = ord($value);
-                } else if ($declType === self::TYPE_RUNE && $vtype === self::TYPE_INT) {
-                    $value = chr($value);
-                } else if ($declType === self::TYPE_INT && $vtype === self::TYPE_FLOAT) {
-                    $this->reportError("Cannot assign float to int for variable $name", $ctx);
-                    return $this->errorSentinel;
-                } else if ($declType !== $vtype && !($declType === self::TYPE_FLOAT && $vtype === self::TYPE_INT)) {
-                    $this->reportError("Incompatible types for variable declaration $name: $declType and $vtype", $ctx);
-                    return $this->errorSentinel;
+                if (is_array($typeNode)) {
+                    $declType = isset($typeNode[0]) ? $this->visit($typeNode[0]) : null;
+                } else {
+                    $declType = $this->visit($typeNode);
                 }
             }
+            
+            // Obtener TODOS los valores de inicialización
+            $exprNodes = $ctx->expression();
+            if (!is_array($exprNodes)) {
+                $exprNodes = $exprNodes !== null ? [$exprNodes] : [];
+            }
+            
+            $values = [];
+            foreach ($exprNodes as $exprNode) {
+                if ($exprNode === null) continue;
+                $val = $this->visit($exprNode);
+                if ($val === $this->errorSentinel) return $this->errorSentinel;
+                $values[] = $val;
+            }
+            
+            // Validar que coincida número de variables con valores
+            if (!empty($values) && count($names) !== count($values)) {
+                $this->reportError("Número de variables (" . count($names) . ") no coincide con número de valores (" . count($values) . ")", $ctx);
+                return $this->errorSentinel;
+            }
+            
+            // Definir cada variable
+            foreach ($names as $idx => $name) {
+                $value = isset($values[$idx]) ? $values[$idx] : null;
+                
+                // Manejar declaración larga de arreglos cuando el tipo viene como texto: [n][m]tipo
+                if ($declType && is_string($declType) && strlen($declType) > 0 && $declType[0] === '[') {
+                    preg_match_all('/\[(\d+)\]/', $declType, $matches);
+                    $sizes = array_map('intval', $matches[1] ?? []);
+                    $elementType = preg_replace('/^(\[[0-9]+\])+/', '', $declType);
 
-            $this->current->define($name, $value, $declType, false, ['line' => $line, 'column' => $column]);
+                    if (empty($sizes) || $elementType === null || $elementType === '') {
+                        $this->reportError("Tipo de arreglo inválido en declaración de $name: $declType", $ctx);
+                        return $this->errorSentinel;
+                    }
+
+                    if ($value === null) {
+                        $value = $this->createMultiDimensionalArray($sizes, $elementType);
+                    } else if (!is_array($value)) {
+                        $this->reportError("Inicialización inválida para arreglo $name", $ctx);
+                        return $this->errorSentinel;
+                    }
+
+                    $this->current->define($name, $value, self::TYPE_ARRAY, false, ['line' => $line, 'column' => $column]);
+                    continue;
+                }
+
+                // Manejar declaración de punteros
+                if ($declType !== null && strpos($declType, '*') === 0) {
+                    $this->dbg("Tipo de puntero detectado: $declType");
+                    $this->dbg("Valor recibido: " . json_encode($value));
+                    
+                    // Verificar que el valor sea una referencia
+                    if (!is_array($value) || !isset($value['isReference']) || !$value['isReference']) {
+                        $this->reportError("Se esperaba una referencia (usar &) para inicializar puntero $name. Valor recibido: " . gettype($value), $ctx);
+                        return $this->errorSentinel;
+                    }
+                    
+                    $this->dbg("Inicializando puntero $name con referencia a: " . $value['name']);
+                    // Guardar la referencia directamente
+                }
+                // Validación normal para no-punteros
+                else if ($declType !== null && $value !== null) {
+                    $vtype = $this->typeOfValue($value);
+
+                
+                    if ($declType === self::TYPE_FLOAT && $vtype === self::TYPE_INT) {
+                        $value = (float)$value;
+                    } else if ($declType === self::TYPE_INT && $vtype === self::TYPE_RUNE) {
+                        $value = ord($value);
+                    } else if ($declType === self::TYPE_RUNE && $vtype === self::TYPE_INT) {
+                        $value = chr($value);
+                    } else if ($declType === self::TYPE_INT && $vtype === self::TYPE_FLOAT) {
+                        $this->reportError("Cannot assign float to int for variable $name", $ctx);
+                        return $this->errorSentinel;
+                    } else if ($declType !== $vtype && !($declType === self::TYPE_FLOAT && $vtype === self::TYPE_INT)) {
+                        $this->reportError("Incompatible types for variable declaration $name: $declType and $vtype", $ctx);
+                        return $this->errorSentinel;
+                    }
+                }
+
+                $this->current->define($name, $value, $declType, false, ['line' => $line, 'column' => $column]);
+            }
         }
         
         return null;
@@ -586,75 +642,75 @@ class interpreter extends GolampiBaseVisitor
     public function visitShortVarDecl($ctx)
     {
         $this->dbg("=== visitShortVarDecl ===");
-        
+
         $names = [];
-        $values = [];
+        $evaluatedValues = [];
         $line = $ctx->start->getLine();
         $column = $ctx->start->getStartIndex();
-        
-        // Recolectar nombres (lado izquierdo de :=)
-        for ($i = 0; $i < $ctx->getChildCount(); $i++) {
-            $child = $ctx->getChild($i);
-            $childText = $child->getText();
-            
-            if ($childText === ':=') {
-                break;
+
+        $idNodes = $ctx->IDENTIFIER();
+        if (is_array($idNodes)) {
+            foreach ($idNodes as $node) {
+                if ($node) $names[] = $node->getText();
             }
-            
-            if ($childText !== ',' && preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $childText)) {
-                $names[] = $childText;
-            }
+        } else if ($idNodes !== null) {
+            $names[] = $idNodes->getText();
         }
 
-        // Recolectar valores (lado derecho de :=)
-        $foundAssign = false;
-        for ($i = 0; $i < $ctx->getChildCount(); $i++) {
-            $child = $ctx->getChild($i);
-            if ($child->getText() === ':=') {
-                $foundAssign = true;
-                continue;
-            }
-            if ($foundAssign) {
-                $val = $this->visit($child);
-                if ($val === $this->errorSentinel) return $this->errorSentinel;
-                
-                if (is_array($val) && isset($val['isReference'])) {
-                    $values[] = $val;
-                } else if (is_array($val)) {
-                    foreach ($val as $v) {
-                        $values[] = $v;
-                    }
-                } else {
-                    $values[] = $val;
-                }
-            }
+        if (empty($names)) {
+            $this->reportError("Declaración corta inválida: no se encontraron identificadores", $ctx);
+            return $this->errorSentinel;
         }
 
-        // Manejar múltiples retornos
-        if (count($names) != count($values)) {
-            if (count($values) == 1 && is_array($values[0]) && count($values[0]) == count($names)) {
-                $values = $values[0];
+        $exprNodes = $ctx->expression();
+        if (!is_array($exprNodes)) {
+            $exprNodes = $exprNodes !== null ? [$exprNodes] : [];
+        }
+
+        foreach ($exprNodes as $exprNode) {
+            if ($exprNode === null) continue;
+            $val = $this->visit($exprNode);
+            if ($val === $this->errorSentinel) return $this->errorSentinel;
+            $evaluatedValues[] = $val;
+        }
+
+        if (empty($evaluatedValues)) {
+            $this->reportError("Declaración corta inválida: no se encontraron expresiones", $ctx);
+            return $this->errorSentinel;
+        }
+
+        $values = [];
+        if (count($names) === count($evaluatedValues)) {
+            $values = $evaluatedValues;
+        } else if (count($names) > 1 && count($evaluatedValues) === 1 && is_array($evaluatedValues[0])) {
+            $candidate = $evaluatedValues[0];
+            $isSequential = array_keys($candidate) === range(0, count($candidate) - 1);
+            if ($isSequential && count($candidate) === count($names)) {
+                $values = $candidate;
             } else {
-                $this->reportError("Número incorrecto de valores en asignación. Esperados: " . count($names) . ", recibidos: " . count($values), $ctx);
+                $this->reportError("Número incorrecto de valores en asignación. Esperados: " . count($names) . ", recibidos: " . count($evaluatedValues), $ctx);
                 return $this->errorSentinel;
             }
+        } else if (count($names) === 1 && count($evaluatedValues) === 1) {
+            $values = [$evaluatedValues[0]];
+        } else {
+            $this->reportError("Número incorrecto de valores en asignación. Esperados: " . count($names) . ", recibidos: " . count($evaluatedValues), $ctx);
+            return $this->errorSentinel;
         }
-        
+
         for ($i = 0; $i < count($names); $i++) {
             $name = $names[$i];
             $value = $values[$i];
             $type = $this->typeOfValue($value);
             
-            // Verificar si la variable ya existe en el ámbito actual
-            try {
-                $this->current->get($name);
-                // Si llegamos aquí, la variable existe - error por redefinición
+            // Verificar si la variable ya existe SOLO en el ámbito actual
+            if ($this->current->hasInCurrentScope($name)) {
                 $this->reportError("Variable '$name' already declared in current scope", $ctx);
                 return $this->errorSentinel;
-            } catch (Exception $e) {
-                // Variable no existe, podemos crearla
-                $this->current->define($name, $value, $type, false, ['line' => $line, 'column' => $column]);
             }
+
+            // Variable no existe en este scope, podemos crearla
+            $this->current->define($name, $value, $type, false, ['line' => $line, 'column' => $column]);
             
             $this->dbg("shortVarDecl $name = " . var_export($value, true));
         }
@@ -1076,6 +1132,12 @@ class interpreter extends GolampiBaseVisitor
 
         if ($ctx->STRING()) {
             $val = trim($ctx->STRING()->getText(), '"');
+            // Procesar escape sequences
+            $val = str_replace('\\n', "\n", $val);
+            $val = str_replace('\\t', "\t", $val);
+            $val = str_replace('\\r', "\r", $val);
+            $val = str_replace('\\\\', "\\", $val);
+            $val = str_replace('\\"', '"', $val);
             return $val;
         }
         if ($ctx->RUNE()) {  // NUEVO
@@ -1090,6 +1152,14 @@ class interpreter extends GolampiBaseVisitor
         }
         if ($ctx->FALSE()) { 
             return false; 
+        }
+        if ($ctx->NIL()) { 
+            return null; 
+        }
+
+        // Literales de arreglo (incluye multidimensionales)
+        if (method_exists($ctx, 'arrayLiteral') && $ctx->arrayLiteral()) {
+            return $this->visit($ctx->arrayLiteral());
         }
         
         // ✅ NUEVO: Manejar LEN '(' expression ')'
@@ -1912,11 +1982,17 @@ class interpreter extends GolampiBaseVisitor
     public function visitForStmt($ctx)
     {
         $this->dbg("=== visitForStmt ===");
-         $this->loopCounter++;
+        $this->loopCounter++;
         if ($this->loopCounter > 10000) {
             $this->dbg("POSIBLE BUCLE INFINITO: más de 10000 iteraciones");
             // Podrías lanzar una excepción o simplemente continuar
         }
+
+        // Scope propio del for (incluye init/cond/post)
+        $previousForScope = $this->current;
+        $this->current = new Enviroment($previousForScope);
+
+        try {
         // Detectar tipo de for
         $hasInit = $ctx->shortVarDecl() !== null;
         
@@ -2086,7 +2162,10 @@ class interpreter extends GolampiBaseVisitor
             }
         }
         
-        return null;
+            return null;
+        } finally {
+            $this->current = $previousForScope;
+        }
     }
     public function visitBreakStmt($ctx)
     {
@@ -2286,7 +2365,12 @@ class interpreter extends GolampiBaseVisitor
                         $this->reportError("Division by zero", $ctx);
                         return $this->errorSentinel;
                     }
-                    $result = $l / $r;
+                    // Si ambos operandos son enteros (int32/rune), mantener división entera
+                    if ($type === self::TYPE_INT) {
+                        $result = intdiv((int)$l, (int)$r);
+                    } else {
+                        $result = $l / $r;
+                    }
                     break;
                 case '%':
                     if ($type !== self::TYPE_INT) {

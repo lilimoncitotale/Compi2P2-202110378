@@ -37,8 +37,10 @@ function guardarArchivo() {
 
 function ejecutar() {
     const codigo = document.getElementById('codigo').value;
+    const consola = document.getElementById('consola');
+    consola.innerHTML = '<div style="padding:15px; background:#1e1e2e; color:#cdd6f4; border-radius:8px;">⏳ Compilando...</div>';
     
-    fetch('/api.php', {
+    fetch('api.php', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
@@ -47,28 +49,80 @@ function ejecutar() {
     })
     .then(response => response.json())
     .then(data => {
-        const consola = document.getElementById('consola');
-        consola.innerHTML = data.salida.replace(/\n/g, '<br>');
+        let html = '';
         
-        resultadoActual = data.salida;
-        // Compatibilidad: soportar respuesta antigua ('errores') y nueva ('syntax' + 'semantic')
-        const syntax = data.syntax || [];
-        const semantic = data.semantic || [];
-        if (data.errores && Array.isArray(data.errores) && syntax.length === 0 && semantic.length === 0) {
-            // respuesta antigua
-            erroresActuales = data.errores;
+        // Mostrar estado de compilación
+        if (data.success) {
+            html += '<div style="padding:10px; background:#40a02b; color:white; border-radius:8px; margin-bottom:15px; font-weight:bold;">✅ Compilación exitosa</div>';
         } else {
-            // combinar ambos tipos
-            erroresActuales = syntax.concat(semantic);
+            html += '<div style="padding:10px; background:#d20f39; color:white; border-radius:8px; margin-bottom:15px; font-weight:bold;">❌ Compilación fallida</div>';
         }
+        
+        // Mostrar código ARM64 generado
+        if (data.assembly || data.salida) {
+            const assembly = data.assembly || data.salida || '';
+            html += '<div style="margin-top:15px;">';
+            html += '<strong style="font-size:16px; color:#89b4fa;">📟 Código ARM64 Generado</strong>';
+            html += '<div style="margin-top:8px; font-size:12px; color:#bac2de;">(' + assembly.split('\n').length + ' líneas)</div>';
+            html += '<textarea id="asmOutput" readonly style="width:100%; height:500px; background:#1e1e2e; color:#a6e3a1; font-family:\'Courier New\', monospace; font-size:11px; padding:12px; border:2px solid #45475a; border-radius:8px; resize:vertical; line-height:1.4;">' + escapeHtml(assembly) + '</textarea>';
+            html += '<div style="margin-top:8px;">';
+            html += '<button onclick="copiarAsambly()" style="padding:8px 15px; background:#45475a; color:#cdd6f4; border:none; border-radius:6px; cursor:pointer; font-weight:bold; margin-right:8px;">📋 Copiar Código</button>';
+            html += '<button onclick="descargarAsambly()" style="padding:8px 15px; background:#45475a; color:#cdd6f4; border:none; border-radius:6px; cursor:pointer; font-weight:bold;">💾 Descargar .s</button>';
+            html += '</div>';
+            html += '</div>';
+        }
+        
+        resultadoActual = data.assembly || data.salida || '';
+        
+        // Mostrar errores si existen
+        const errores = [...(data.syntax || []), ...(data.semantic || [])];
+        if (errores.length > 0) {
+            html += '<div style="margin-top:15px;">';
+            html += '<strong style="font-size:16px; color:#f38ba8;">⚠️ Errores detectados (' + errores.length + ')</strong>';
+            html += '<div style="margin-top:8px;">';
+            errores.forEach(err => {
+                const msg = err.message || err.msg || 'Error desconocido';
+                const line = err.line || err.col || 'N/A';
+                const tipo = err.message ? 'Sintáctico' : 'Semántico';
+                html += `<div style="padding:10px; background:#31324a; border-left:4px solid #f38ba8; margin-bottom:8px; border-radius:4px; color:#f38ba8;">
+                    <strong>[${tipo}]</strong> Línea ${line}: ${msg}
+                </div>`;
+            });
+            html += '</div>';
+            html += '</div>';
+        }
+        
+        // Mostrar tabla de símbolos si hay
+        if (data.tabla && data.tabla.length > 0) {
+            html += '<div style="margin-top:15px;">';
+            html += '<strong style="font-size:16px; color:#cba6f7;">📋 Tabla de Símbolos (' + data.tabla.length + ' símbolos)</strong>';
+            html += '<div style="margin-top:8px; overflow-x:auto;">';
+            html += '<table style="width:100%; border-collapse:collapse; background:#1e1e2e; color:#cdd6f4;">';
+            html += '<tr style="background:#45475a; font-weight:bold;"><th style="padding:10px; border:1px solid #585b70; text-align:left;">ID</th><th style="padding:10px; border:1px solid #585b70; text-align:left;">Tipo</th><th style="padding:10px; border:1px solid #585b70; text-align:left;">Valor</th><th style="padding:10px; border:1px solid #585b70; text-align:left;">Ámbito</th></tr>';
+            data.tabla.forEach((sym, idx) => {
+                html += `<tr style="border-bottom:1px solid #585b70;"><td style="padding:8px; border:1px solid #585b70;">${sym.identifier || ''}</td><td style="padding:8px; border:1px solid #585b70;"><span style="color:#89b4fa;">${sym.type || ''}</span></td><td style="padding:8px; border:1px solid #585b70;">${sym.value || ''}</td><td style="padding:8px; border:1px solid #585b70;">${sym.scope || ''}</td></tr>`;
+            });
+            html += '</table>';
+            html += '</div>';
+            html += '</div>';
+        }
+        
+        consola.innerHTML = html;
         tablaActual = data.tabla || [];
+        erroresActuales = errores;
         erroresActualesCsv = data.errors_csv || null;
         tokensActuales = data.tokens || [];
         tokensCsvActual = data.tokens_csv || null;
     })
     .catch(error => {
-        console.error('Error:', error);
+        consola.innerHTML = `<div style="padding:15px; background:#d20f39; color:white; border-radius:8px;">❌ Error de conexión: ${error.message}</div>`;
     });
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 function limpiarConsola() {
@@ -83,6 +137,25 @@ function descargarResultado() {
     const a = document.createElement('a');
     a.href = url;
     a.download = 'resultado.txt';
+    a.click();
+}
+
+function copiarAsambly() {
+    const txt = document.getElementById('asmOutput');
+    if (!txt) return alert('No hay código para copiar');
+    txt.select();
+    document.execCommand('copy');
+    alert('✅ Código copiado al portapapeles');
+}
+
+function descargarAsambly() {
+    if (!resultadoActual) return alert('No hay código para descargar');
+    
+    const blob = new Blob([resultadoActual], { type: 'text/x-asm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'output.s';
     a.click();
 }
 

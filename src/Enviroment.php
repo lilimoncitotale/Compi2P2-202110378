@@ -164,10 +164,14 @@ class Enviroment {
     // Inferir tipo de los elementos de un array
     private function inferElementType($array) {
         if (!is_array($array) || empty($array)) return self::TYPE_NIL;
-        
-        // Tomar el primer elemento como muestra
-        $first = reset($array);
-        return $this->inferType($first);
+
+        // Descender hasta el tipo base (última dimensión)
+        $current = $array;
+        while (is_array($current) && !empty($current) && !isset($current['isReference'])) {
+            $current = reset($current);
+        }
+
+        return $this->inferType($current);
     }
 
     // Contar dimensiones de un array
@@ -192,6 +196,11 @@ class Enviroment {
         }
 
         throw new Exception("Variable no definida: $name");
+    }
+
+    // Verificar existencia solo en el ámbito actual (sin buscar en padres)
+    public function hasInCurrentScope($name): bool {
+        return array_key_exists($name, $this->values);
     }
 
     // Obtener tipo de variable

@@ -17,7 +17,7 @@ declaration
     ;
 
 constDecl
-    : CONST IDENTIFIER type '=' expression
+	: CONST IDENTIFIER type? '=' expression
     ;
 
 functionDecl
@@ -36,6 +36,7 @@ parameter
 varDecl
     : VAR IDENTIFIER (',' IDENTIFIER)* type ('=' expression (',' expression)*)?
     | VAR IDENTIFIER arrayType ('=' arrayLiteral)?
+	| IDENTIFIER arrayType ('=' arrayLiteral)?
     ;
 arrayType
     : '[' expression ']' arrayType
@@ -43,14 +44,13 @@ arrayType
     ;
 
 arrayLiteral
-	: arrayType '{' arrayElement (',' arrayElement)* '}'
-	| '{' arrayElement (',' arrayElement)* '}'
+	: arrayType? '{' arrayElement (',' arrayElement)* ','? '}'
 	;
 
 arrayElement
-    : arrayLiteral
-    | expression
-    ;
+	: '{' arrayElement (',' arrayElement)* ','? '}'
+	| expression
+	;
 
 //==================================
 //	BLOQUES Y SENTENCIAS
@@ -62,6 +62,7 @@ block
 
 statement
 	: varDecl
+	| constDecl
 	| switchStmt
 	| expresionStmt
 	| shortVarDecl
@@ -75,16 +76,23 @@ statement
 	| block
 	;
 
+
+
 shortVarDecl 
-	: IDENTIFIER (',' IDENTIFIER)* ':=' expression (',' expression)*
+	: IDENTIFIER (',' IDENTIFIER)* ASSIGN_SHORT shortValue (',' shortValue)*
+	;
+
+shortValue
+	: arrayType arrayLiteral
+	| expression
 	;
 
 assignment
     : IDENTIFIER ('[' expression ']')+ '=' expression      // Array access
     | IDENTIFIER '=' expression                             // Simple assignment
     | ('*')+ IDENTIFIER '=' expression                      // Pointer assignment
-    | primary ('++' | '--')                                 // Incremento/decremento
-    | IDENTIFIER ('+=' | '-=' | '*=' | '/=' | '%=') expression  // Asignación compuesta
+	| primary (PLUSPLUS | MINUSMINUS)                       // Incremento/decremento
+	| IDENTIFIER (PLUSEQ | MINUSEQ | STAREQ | SLASHEQ | MODEQ) expression  // Asignación compuesta
     ;
 
 expresionStmt
@@ -134,11 +142,11 @@ expression
 	;
 
 logicalOr
-	: logicalAnd ('||' logicalAnd)*
+	: logicalAnd (OR logicalAnd)*
 	;
 
 logicalAnd
-	: equality ('&&' equality)*
+	: equality (AND equality)*
 	;
 
 equality
@@ -171,15 +179,15 @@ primary
     | RUNE
     | TRUE
     | FALSE
+    | NIL
     | LEN '(' expression ')'
 	| qualified '(' argumentList? ')'
 	| type '(' argumentList? ')'
-	| arrayLiteral
 	| qualified
     | '(' expression ')'
 	| qualified ('[' expression ']')*
-    | primary '++'          // Incremento postfijo
-    | primary '--'          // Decremento postfijo
+	| primary PLUSPLUS          // Incremento postfijo
+	| primary MINUSMINUS        // Decremento postfijo
     ;
 
 qualified
@@ -228,10 +236,11 @@ CONTINUE    : 'continue';
 TRUE        : 'true';
 FALSE       : 'false';
 LEN         : 'len';
+NIL         : 'nil';
 
 // Tipos base
-INT         : 'int' [0-9]*;
-FLOATTYPE   : 'float' [0-9]*;
+INT         : 'int32';
+FLOATTYPE   : 'float32';
 BOOL        : 'bool';
 STRINGTYPE  : 'string';
 RUNETYPE    : 'rune';  
@@ -239,8 +248,9 @@ RUNETYPE    : 'rune';
 // Literales
 INTEGER     : [0-9]+;
 FLOAT       : [0-9]+ '.' [0-9]+;
-STRING      : '"' .*? '"';
-RUNE        : '\'' . '\'';  // Un solo carácter entre comillas simples
+fragment ESC : '\\' . ;
+STRING      : '"' ( ESC | ~["\\\r\n] )* '"' ;
+RUNE        : '\'' ( ESC | ~['\\\r\n] ) '\'' ;  // Un solo carácter o escape entre comillas simples
 
 // Operadores de incremento/decremento y asignación compuesta
 PLUSPLUS    : '++';
@@ -250,6 +260,10 @@ MINUSEQ     : '-=';
 STAREQ      : '*=';
 SLASHEQ     : '/=';
 MODEQ       : '%=';
+// Operadores lógicos y asignación corta
+AND         : '&&';
+OR          : '||';
+ASSIGN_SHORT: ':=';
 
 // Identificadores (cualquier cosa que no sea palabra reservada)
 IDENTIFIER  : [a-zA-Z_][a-zA-Z0-9_]*;
