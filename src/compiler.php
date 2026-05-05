@@ -2263,33 +2263,51 @@ class Compiler extends GolampiBaseVisitor {
                         }
                     }
                     
-                    // Emitir argumentos en los registros correctos
-                    // Estrategia: Evaluar de derecha a izquierda para evitar sobrescribir x0
+                    // Emitir argumentos preservando el orden RTL y evitando que
+                    // llamadas anidadas clobberen registros ya calculados.
                     // Audit note: garantizar evaluación derecha->izquierda (especificación)
                     $argCount = count($argExprs);
+                    $stackSize = $argCount * 16;
+                    if ($stackSize > 0) {
+                        $this->emit("sub sp, sp, #$stackSize");
+                    }
+
                     for ($argIdx = $argCount - 1; $argIdx >= 0; $argIdx--) {
                         $argExpr = $argExprs[$argIdx];
                         if ($argExpr === null) continue;
-                        
+
                         // Obtener valor sin emitir código
                         $argValue = $this->getValueWithoutEmit($argExpr);
-                        
-                        // Emitir código para poner el argumento en el registro correcto
+
+                        // Evaluar el argumento en x0
                         if (is_numeric($argValue)) {
-                            $this->emit("mov x$argIdx, #$argValue");
+                            $this->emit("mov x0, #$argValue");
                         } elseif (is_string($argValue) && strpos($argValue, 'var_') === 0) {
                             $varName = substr($argValue, 4);
                             $offset = $this->getVarOffset($varName);
-                            $this->emit("ldr x$argIdx, [x29, #$offset]");
+                            $this->emit("ldr x0, [x29, #$offset]");
                         } else {
-                            // Para expresiones complejas, evaluarlas y mover resultado al registro
-                            $this->visit($argExpr);  // Evalúa en x0
-                            if ($argIdx !== 0) {
-                                $this->emit("mov x$argIdx, x0");  // Mover de x0 a x$argIdx
-                            }
+                            // Para expresiones complejas, evaluarlas y dejar el resultado en x0
+                            $this->visit($argExpr);
+                        }
+
+                        // Guardar temporalmente el argumento ya evaluado
+                        if ($stackSize > 0) {
+                            $slotOffset = $argIdx * 16;
+                            $this->emit("str x0, [sp, #$slotOffset]");
                         }
                     }
-                    
+
+                    // Restaurar argumentos en x0-x7 en el orden esperado por la llamada
+                    for ($argIdx = 0; $argIdx < $argCount; $argIdx++) {
+                        $slotOffset = $argIdx * 16;
+                        $this->emit("ldr x$argIdx, [sp, #$slotOffset]");
+                    }
+
+                    if ($stackSize > 0) {
+                        $this->emit("add sp, sp, #$stackSize");
+                    }
+
                     // Llamar a la función
                     $callName = ($funcName === 'main') ? '_start' : $funcName;
                     $this->emit("bl " . $callName);

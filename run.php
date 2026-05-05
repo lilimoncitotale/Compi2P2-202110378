@@ -214,6 +214,8 @@ file_put_contents('/tmp/preprocessed_input.golampi', $input);
 
 // Crear el stream de entrada
 echo "Creando InputStream...\n";
+$input = preg_replace('/\\bint\\b/', 'int32', $input);
+$input = preg_replace('/\\bfloat\\b/', 'float32', $input);
 $stream = InputStream::fromString($input);
 
 // Crear el lexer

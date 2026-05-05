@@ -108,6 +108,10 @@ $codigo = (function($input){
     return implode("\n", $outLines);
 })($codigo);
 
+// Normalizar alias de tipos: aceptar 'int' y 'float' como 'int32'/'float32'
+$codigo = preg_replace('/\bint\b/', 'int32', $codigo);
+$codigo = preg_replace('/\bfloat\b/', 'float32', $codigo);
+
 // Crear stream y lexer
 $inputStream = InputStream::fromString($codigo);
 $lexer = new GolampiLexer($inputStream);
